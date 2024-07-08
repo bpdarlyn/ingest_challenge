@@ -1,0 +1,21 @@
+version: '3'
+
+volumes:
+  mysql_data_local:
+    driver: local
+
+services:
+  django: &django
+    build:
+      context: .
+      dockerfile: ./compose/local/django/Dockerfile
+    volumes:
+      - .:/app
+    env_file: ./compose/local/local.env
+
+  app:
+    <<: *django
+    ports:
+      - "8000:8000"
+    env_file: ./compose/local/local.env
+    command: python manage.py runserver 0.0.0.0:8000
