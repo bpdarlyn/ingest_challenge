@@ -1,3 +1,6 @@
+import os
+from datetime import datetime
+
 from rest_framework import viewsets, status
 from rest_framework.views import APIView
 from rest_framework.response import Response
@@ -13,27 +16,36 @@ class CompanyViewSet(viewsets.ModelViewSet):
 
 
 class GeneratePresignedUrlView(APIView):
+    PRESIGNED_BUCKET = f'{os.getenv("BACKEND_STACK")}-tmp'
+    PRESIGNED_KEY_PUT = 'uploads/{timestamp}/{filename}'
+
     def get(self, request):
-        # s3_client = boto3.client(
-        #     's3',
-        #     region_name=settings.AWS_S3_REGION_NAME,
-        #     aws_access_key_id=settings.AWS_ACCESS_KEY_ID,
-        #     aws_secret_access_key=settings.AWS_SECRET_ACCESS_KEY,
-        # )
+        s3_client = boto3.client('s3')
 
-        # Generar una URL pre-firmada para la carga de un archivo
-        # presigned_url = s3_client.generate_presigned_url(
-        #     'put_object',
-        #     Params={
-        #         'Bucket': settings.AWS_STORAGE_BUCKET_NAME,
-        #         'Key': 'uploads/your_filename.ext',  # Cambia el nombre del archivo según sea necesario
-        #         'ContentType': 'application/octet-stream'  # Opcional: especifica el tipo de contenido
-        #     },
-        #     ExpiresIn=3600  # La URL expira en 1 hora
-        # )
-        presigned_url = "here the s3 url presigned ready to upload"
+        filename = request.query_params.get('filename')
 
-        return Response({'url': presigned_url}, status=status.HTTP_200_OK)
+        # Generate a Presigned URL to avoid overload to our servers
+
+        s3_bucket = self.PRESIGNED_BUCKET
+        s3_key = self.PRESIGNED_KEY_PUT.format(timestamp=datetime.now, filename=filename)
+
+        presigned_url = s3_client.generate_presigned_url(
+            'put_object',
+            Params={
+                'Bucket': s3_bucket,
+                'Key': s3_key,
+                'ContentType': 'text/csv'
+            },
+            ExpiresIn=3600  # 1 hour of expiration
+        )
+
+        response = {
+            'presigned_url': presigned_url,
+            's3_bucket': s3_bucket,
+            's3_key': s3_key,
+        }
+
+        return Response(response, status=status.HTTP_200_OK)
 
 
 

@@ -1,0 +1,19 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: backend resources ingest challenge resources.yaml
+#Parameters:
+Resources:
+  S3BucketTMP:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub '${AWS::StackName}-tmp'
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      LifecycleConfiguration:
+        Rules:
+          - Id: Remove after 7 days
+            Status: Enabled
+            ExpirationInDays: 7
+    DeletionPolicy: Delete

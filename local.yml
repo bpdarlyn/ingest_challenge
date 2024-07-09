@@ -1,7 +1,7 @@
 version: '3'
 
 volumes:
-  mysql_data_local:
+  postgres_data_local:
     driver: local
 
 services:
@@ -12,10 +12,27 @@ services:
     volumes:
       - .:/app
     env_file: ./compose/local/local.env
+    depends_on:
+      - redis_server
+      - postgres_server
 
   app:
     <<: *django
     ports:
       - "8000:8000"
-    env_file: ./compose/local/local.env
     command: python manage.py runserver 0.0.0.0:8000
+
+  celeryworker:
+    <<: *django
+    command: celery -A backend worker -l INFO
+
+  redis_server:
+    image: redis:6.0
+
+  postgres_server:
+    image: postgres:13
+    volumes:
+      - postgres_data_local:/var/lib/postgresql/data
+    ports:
+      - "5434:5432"
+    env_file: ./compose/local/local.env

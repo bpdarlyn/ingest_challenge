@@ -22,6 +22,7 @@ def main():
     sys.path.append(os.path.join(current_path, 'backend'))
 
     execute_from_command_line(sys.argv)
+    print('#############manage.py############')
 
 
 if __name__ == '__main__':
