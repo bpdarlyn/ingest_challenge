@@ -93,8 +93,8 @@ def process_industries(arguments):
 
 @shared_task
 def prepare_organization(results):
-    countries_dict, csv_path = results[0]
-    industries_dict, csv_path2 = results[1]
+    industries_dict, csv_path = results[0]
+    countries_dict, csv_path2 = results[1]
     custom_column_names = ['index_item', 'organization_id', 'name', 'website', 'country_id', 'description', 'year_founded', 'industry_id', 'number_of_employees']
     df = pd.read_csv(csv_path, names=custom_column_names, header=0)
     df = df.drop(columns=['index_item'])
@@ -102,7 +102,7 @@ def prepare_organization(results):
     df['country_id'] = df['country_id'].map(countries_dict)
     df['industry_id'] = df['industry_id'].map(industries_dict)
 
-    chunk_size = 10000
+    chunk_size = 10_000
 
     column_order = [
         'organization_id', 'name', 'website', 'description', 'year_founded',
@@ -113,7 +113,7 @@ def prepare_organization(results):
 
     for i, chunk in enumerate(split_dataframe(df, chunk_size)):
         csv_file_path = f'/tmp/organizations_chunk_{i + 1}.csv'
-        chunk.to_csv(csv_file_path, index=False, columns=column_order)
+        chunk.to_csv(csv_file_path, index=False, columns=column_order, header=False)
         all_chunks.append(csv_file_path)
 
     return all_chunks, column_order
@@ -121,7 +121,13 @@ def prepare_organization(results):
 
 @shared_task
 def process_chunk_organization(csv_file_path, headers):
-    run_bulk_import(csv_file_path=csv_file_path, entity=Organization, additional_query=None, headers=headers)
+    table_name = Organization._meta.db_table
+
+    additional_query = f"""
+                        INSERT INTO {table_name} ({','.join(headers)})
+                        SELECT {','.join(headers)} FROM tmp_{table_name};
+                    """
+    run_bulk_import(csv_file_path=csv_file_path, entity=Organization, additional_query=additional_query, headers=headers)
 
     return 'process_chunk_organization'
 
@@ -133,7 +139,7 @@ def finish_processing(results):
 
 @shared_task
 def create_groups(results):
-    return group(process_chunk_organization.s(x[0], results[1]) for x in results[0]).apply_async()
+    return group(process_chunk_organization.s(x, results[1]) for x in results[0]).apply_async()
 
 
 def start_workflow(bucket, s3_key):
