@@ -35,3 +35,14 @@ DATABASES = {
         "PORT": os.getenv('POSTGRES_PORT'),
     }
 }
+
+ELASTICSEARCH_DSL = {
+    'default': {
+        'hosts': f'http://{os.getenv("ELASTICSEARCH_HOST")}:{os.getenv("ELASTICSEARCH_PORT")}'
+    }
+}
+
+# Name of the Elasticsearch index
+ELASTICSEARCH_INDEX_NAMES = {
+    'documents.organization': 'local_organization',
+}

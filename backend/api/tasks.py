@@ -7,6 +7,7 @@ logger = logging.getLogger(__package__)
 
 from celery import chain, group, chord, shared_task
 from celery.contrib import rdb
+from elasticsearch import Elasticsearch, helpers
 
 import pandas as pd
 from django.db.models.fields import Field
@@ -15,6 +16,7 @@ from backend.api.models import Country, Industry, Organization
 from celery.result import AsyncResult
 
 from backend.helpers.handler_s3 import HandlerS3
+from django.conf import settings
 
 
 @shared_task(bind=True)
@@ -135,6 +137,23 @@ def prepare_organization(self, results):
     return all_chunks, column_order
 
 
+def import_to_elastic(csv_file_path, entity, index, header):
+    df = pd.read_csv(csv_file_path, header=None, names=header)
+    list_of_dicts = df.to_dict('records')
+    for doc in list_of_dicts:
+        yield {'_index': index,
+               '_source': doc}
+
+
+def run_bulk_import_elastic_search(csv_file_path, entity, index, header):
+    es_client = Elasticsearch(settings.ELASTICSEARCH_DSL['default']['hosts'])
+
+    for status_ok, response in helpers.streaming_bulk(es_client, actions=import_to_elastic(csv_file_path=csv_file_path, entity=entity, index=index, header=header)):
+        if not status_ok:
+            # if failure inserting, log response
+            print(response)
+
+
 @shared_task(bind=True)
 def process_chunk_organization(self, csv_file_path, headers):
     self.update_state(state='PROGRESS', meta={'progress': 50})
@@ -145,7 +164,13 @@ def process_chunk_organization(self, csv_file_path, headers):
                         SELECT {','.join(headers)} FROM tmp_{table_name};
                     """
     run_bulk_import(csv_file_path=csv_file_path, entity=Organization, additional_query=additional_query, headers=headers)
+
+    index = settings.ELASTICSEARCH_INDEX_NAMES['documents.organization']
+    run_bulk_import_elastic_search(csv_file_path=csv_file_path, entity=Organization, index=index, header=headers)
+
     self.update_state(state='PROGRESS', meta={'progress': 100})
+
+    os.remove(csv_file_path)
 
     return 'process_chunk_organization'
 
@@ -222,7 +247,6 @@ def bulk_import_entity(csv_file_path, entity, additional_query=None, headers=Non
 @transaction.atomic
 def run_bulk_import(csv_file_path, entity, additional_query, headers):
     bulk_import_entity(csv_file_path, entity, additional_query, headers)
-    os.remove(csv_file_path)
 
 
 def split_dataframe(df, chunk_size):

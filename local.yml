@@ -5,7 +5,10 @@ volumes:
     driver: local
   tmp_uploads:
     driver: local
-
+  es_data:
+    driver: local
+  kibanadata:
+    driver: local
 
 services:
   django: &django
@@ -28,7 +31,7 @@ services:
 
   celeryworker:
     <<: *django
-    command: celery -A backend worker --concurrency=7 -l INFO
+    command: celery -A backend worker -l INFO
 
   redis_server:
     image: redis:6.0
@@ -40,3 +43,29 @@ services:
     ports:
       - "5434:5432"
     env_file: ./compose/local/local.env
+
+  elasticsearch:
+    image: docker.elastic.co/elasticsearch/elasticsearch:${STACK_VERSION}
+    container_name: elasticsearch
+    volumes:
+      - es_data:/usr/share/elasticsearch/data
+    environment:
+      - "ES_JAVA_OPTS=-Xms512m -Xmx512m"
+      - "discovery.type=single-node"
+      - xpack.monitoring.collection.enabled=true
+      - cluster.routing.allocation.disk.threshold_enabled=false
+      - xpack.security.enabled=false
+    ports:
+      - "9200:9200"
+
+  kibana:
+    image: docker.elastic.co/kibana/kibana:${STACK_VERSION}
+    volumes:
+      - kibanadata:/usr/share/kibana/data
+    environment:
+      - "ELASTICSEARCH_HOSTS=http://elasticsearch:9200"
+      - xpack.security.enabled=false
+    ports:
+      - "5601:5601"
+    depends_on:
+      - elasticsearch
