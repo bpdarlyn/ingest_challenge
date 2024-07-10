@@ -28,7 +28,7 @@ services:
 
   celeryworker:
     <<: *django
-    command: celery -A backend worker -l INFO
+    command: celery -A backend worker --concurrency=7 -l INFO
 
   redis_server:
     image: redis:6.0

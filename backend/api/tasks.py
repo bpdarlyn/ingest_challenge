@@ -1,3 +1,5 @@
+import time
+import datetime
 import logging
 import os
 
@@ -10,6 +12,7 @@ import pandas as pd
 from django.db.models.fields import Field
 from django.db import connection, transaction
 from backend.api.models import Country, Industry, Organization
+from celery.result import AsyncResult
 
 from backend.helpers.handler_s3 import HandlerS3
 
@@ -21,22 +24,28 @@ def download_file(self, bucket, s3_key):
 
     localfile = f'/tmp/{s3_key}'
 
+    self.update_state(state='PROGRESS', meta={'progress': 20})
+
     handler_s3.get_uri_to_file(uri=s3_uri, localfile=localfile)
+
+    self.update_state(state='PROGRESS', meta={'progress': 100})
 
     return localfile
 
 
-@shared_task
-def read_file(file_path):
+@shared_task(bind=True)
+def read_file(self, file_path):
     df = pd.read_csv(file_path)
+    self.update_state(state='PROGRESS', meta={'progress': 50})
     countries_names = df['Country'].unique().tolist()
     industries_names = df['Industry'].unique().tolist()
+    self.update_state(state='PROGRESS', meta={'progress': 100})
 
     return countries_names, industries_names, file_path
 
 
-@shared_task
-def process_countries(arguments):
+@shared_task(bind=True)
+def process_countries(self, arguments):
     """
     arguments[0] countries
     arguments[1] industries
@@ -46,6 +55,7 @@ def process_countries(arguments):
     df = pd.DataFrame(arguments[0], columns=columns)
     csv_file_path = '/tmp/countries.csv'
     df.to_csv(csv_file_path, index=False, header=False)
+    self.update_state(state='PROGRESS', meta={'progress': 50})
 
     table_name = Country._meta.db_table
 
@@ -57,14 +67,15 @@ def process_countries(arguments):
             """
 
     run_bulk_import(csv_file_path=csv_file_path, entity=Country, additional_query=additional_query, headers=columns)
+    self.update_state(state='PROGRESS', meta={'progress': 100})
 
     countries = Country.objects.values('id', 'name')
 
     return {country['name']: country['id'] for country in countries}, arguments[-1]
 
 
-@shared_task
-def process_industries(arguments):
+@shared_task(bind=True)
+def process_industries(self, arguments):
     """
         arguments[0] countries
         arguments[1] industries
@@ -74,6 +85,8 @@ def process_industries(arguments):
     df = pd.DataFrame(arguments[1], columns=columns)
     csv_file_path = '/tmp/industries.csv'
     df.to_csv(csv_file_path, index=False, header=False)
+
+    self.update_state(state='PROGRESS', meta={'progress': 50})
 
     table_name = Industry._meta.db_table
 
@@ -86,17 +99,20 @@ def process_industries(arguments):
 
     run_bulk_import(csv_file_path=csv_file_path, entity=Industry, additional_query=additional_query, headers=columns)
 
+    self.update_state(state='PROGRESS', meta={'progress': 100})
+
     industries = Industry.objects.values('id', 'name')
 
     return {industry['name']: industry['id'] for industry in industries}, arguments[-1]
 
 
-@shared_task
-def prepare_organization(results):
+@shared_task(bind=True)
+def prepare_organization(self, results):
     industries_dict, csv_path = results[0]
     countries_dict, csv_path2 = results[1]
     custom_column_names = ['index_item', 'organization_id', 'name', 'website', 'country_id', 'description', 'year_founded', 'industry_id', 'number_of_employees']
     df = pd.read_csv(csv_path, names=custom_column_names, header=0)
+    self.update_state(state='PROGRESS', meta={'progress': 50})
     df = df.drop(columns=['index_item'])
 
     df['country_id'] = df['country_id'].map(countries_dict)
@@ -115,12 +131,13 @@ def prepare_organization(results):
         csv_file_path = f'/tmp/organizations_chunk_{i + 1}.csv'
         chunk.to_csv(csv_file_path, index=False, columns=column_order, header=False)
         all_chunks.append(csv_file_path)
-
+    self.update_state(state='PROGRESS', meta={'progress': 100})
     return all_chunks, column_order
 
 
-@shared_task
-def process_chunk_organization(csv_file_path, headers):
+@shared_task(bind=True)
+def process_chunk_organization(self, csv_file_path, headers):
+    self.update_state(state='PROGRESS', meta={'progress': 50})
     table_name = Organization._meta.db_table
 
     additional_query = f"""
@@ -128,21 +145,26 @@ def process_chunk_organization(csv_file_path, headers):
                         SELECT {','.join(headers)} FROM tmp_{table_name};
                     """
     run_bulk_import(csv_file_path=csv_file_path, entity=Organization, additional_query=additional_query, headers=headers)
+    self.update_state(state='PROGRESS', meta={'progress': 100})
 
     return 'process_chunk_organization'
 
 
-@shared_task
-def finish_processing(results):
+@shared_task(bind=True)
+def finish_processing(self, results):
+    self.update_state(state='PROGRESS', meta={'progress': 100})
     return 'finalized'
 
 
-@shared_task
-def create_groups(results):
+@shared_task(bind=True)
+def create_groups(self, results):
+    self.update_state(state='PROGRESS', meta={'progress': 100})
     return group(process_chunk_organization.s(x, results[1]) for x in results[0]).apply_async()
 
 
-def start_workflow(bucket, s3_key):
+@shared_task(bind=True)
+def start_workflow(self, bucket, s3_key):
+    start_time = datetime.datetime.now()
     final_workflow = chain(
         download_file.s(bucket, s3_key),
         read_file.s(),
@@ -150,7 +172,34 @@ def start_workflow(bucket, s3_key):
         chord(create_groups.s(), finish_processing.s())
     )
 
-    return final_workflow.apply_async()
+    result = final_workflow.apply_async()
+    task_ids = get_task_ids(result)
+
+    while not result.ready():
+        total_progress = 0
+        for task_id in task_ids:
+            res = AsyncResult(task_id)
+            if res.state == 'PROGRESS':
+                total_progress += res.info.get('progress', 0)
+            elif res.state == 'SUCCESS':
+                total_progress += 100
+        general_progress = total_progress / len(task_ids)
+        self.update_state(state='PROGRESS', meta={'progress': general_progress})
+        time.sleep(1)
+
+    general_progress = 100
+    self.update_state(state='PROGRESS', meta={'progress': general_progress})
+
+    end_time = datetime.datetime.now()
+    execution_time = (end_time - start_time).total_seconds()
+
+    return {
+        'result_task_id': result.id,
+        'start_time': start_time.isoformat(),
+        'end_time': end_time.isoformat(),
+        'execution_time': execution_time,
+        'general_progress': general_progress
+    }
 
 
 def bulk_import_entity(csv_file_path, entity, additional_query=None, headers=None):
@@ -179,3 +228,14 @@ def run_bulk_import(csv_file_path, entity, additional_query, headers):
 def split_dataframe(df, chunk_size):
     for i in range(0, df.shape[0], chunk_size):
         yield df.iloc[i:i + chunk_size]
+
+
+def get_task_ids(result):
+    task_ids = []
+    def recurse(result):
+        task_ids.append(result.id)
+        if hasattr(result, 'parent') and result.parent:
+            recurse(result.parent)
+    recurse(result)
+    return task_ids
+

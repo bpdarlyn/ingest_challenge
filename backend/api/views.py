@@ -47,16 +47,18 @@ class StartProcessingView(APIView):
         data = request.data
         s3_bucket, s3_key = data.get('s3_bucket'), data.get('s3_key')
 
-        result = api_tasks.start_workflow(bucket=s3_bucket, s3_key=s3_key)
+        result = api_tasks.start_workflow.apply_async(args=(s3_bucket, s3_key))
         return Response({
             'job_id': result.id,
         }, status=status.HTTP_200_OK)
 
     def get(self, request, job_id):
         result = AsyncResult(job_id)
+        # execution_time = result.date_done - result.date_submitted
         response_data = {
             'task_id': job_id,
             'status': result.status,
+            'info': result.info if not result.ready() else None,
             'result': result.result if result.ready() else None,
         }
 
