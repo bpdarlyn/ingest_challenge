@@ -1,5 +1,7 @@
 from django.contrib import admin
-from .models import Company
+from backend.api.models import Country, Industry, Organization
 
 # Register your models here.
-admin.site.register(Company)
+admin.site.register(Country)
+admin.site.register(Industry)
+admin.site.register(Organization)

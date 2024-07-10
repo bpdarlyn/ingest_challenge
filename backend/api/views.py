@@ -4,15 +4,9 @@ from datetime import datetime
 from rest_framework import viewsets, status
 from rest_framework.views import APIView
 from rest_framework.response import Response
-from .models import Company
-from .serializer import CompanySerializer
-from django.conf import settings
 import boto3
-
-
-class CompanyViewSet(viewsets.ModelViewSet):
-    queryset = Company.objects.all()
-    serializer_class = CompanySerializer
+from backend.api import tasks as api_tasks
+from celery.result import AsyncResult
 
 
 class GeneratePresignedUrlView(APIView):
@@ -27,7 +21,7 @@ class GeneratePresignedUrlView(APIView):
         # Generate a Presigned URL to avoid overload to our servers
 
         s3_bucket = self.PRESIGNED_BUCKET
-        s3_key = self.PRESIGNED_KEY_PUT.format(timestamp=datetime.now, filename=filename)
+        s3_key = self.PRESIGNED_KEY_PUT.format(timestamp=str(datetime.now().strftime('%Y%m%d%H%M%S')), filename=filename)
 
         presigned_url = s3_client.generate_presigned_url(
             'put_object',
@@ -48,5 +42,23 @@ class GeneratePresignedUrlView(APIView):
         return Response(response, status=status.HTTP_200_OK)
 
 
+class StartProcessingView(APIView):
+    def post(self, request):
+        data = request.data
+        s3_bucket, s3_key = data.get('s3_bucket'), data.get('s3_key')
 
+        result = api_tasks.start_workflow(bucket=s3_bucket, s3_key=s3_key)
+        return Response({
+            'job_id': result.id,
+        }, status=status.HTTP_200_OK)
+
+    def get(self, request, job_id):
+        result = AsyncResult(job_id)
+        response_data = {
+            'task_id': job_id,
+            'status': result.status,
+            'result': result.result if result.ready() else None,
+        }
+
+        return Response(response_data, status=status.HTTP_200_OK)
 # Create your views here.

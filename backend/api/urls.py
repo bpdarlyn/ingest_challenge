@@ -3,9 +3,11 @@ from rest_framework import routers
 from backend.api import views as api_views
 
 router = routers.DefaultRouter()
-router.register(f'companies', api_views.CompanyViewSet)
+# router.register(f'companies', api_views.CompanyViewSet)
 
 urlpatterns = [
     path('', include(router.urls)),
     path('generate-presigned-url', api_views.GeneratePresignedUrlView.as_view()),
+    path('enqueue-job', api_views.StartProcessingView.as_view()),
+    path('status-job/<str:job_id>', api_views.StartProcessingView.as_view()),
 ]

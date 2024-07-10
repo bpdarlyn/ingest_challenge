@@ -3,6 +3,9 @@ version: '3'
 volumes:
   postgres_data_local:
     driver: local
+  tmp_uploads:
+    driver: local
+
 
 services:
   django: &django
@@ -11,6 +14,7 @@ services:
       dockerfile: ./compose/local/django/Dockerfile
     volumes:
       - .:/app
+      - tmp_uploads:/tmp/uploads
     env_file: ./compose/local/local.env
     depends_on:
       - redis_server
