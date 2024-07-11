@@ -1,12 +1,70 @@
 import os
 from datetime import datetime
 
-from rest_framework import viewsets, status
+from rest_framework import status
 from rest_framework.views import APIView
 from rest_framework.response import Response
 import boto3
 from backend.api import tasks as api_tasks
 from celery.result import AsyncResult
+
+
+from django_elasticsearch_dsl_drf.constants import (
+    LOOKUP_FILTER_TERMS,
+    LOOKUP_FILTER_RANGE,
+    LOOKUP_FILTER_PREFIX,
+    LOOKUP_FILTER_WILDCARD,
+    LOOKUP_QUERY_IN,
+    LOOKUP_QUERY_EXCLUDE,
+)
+from django_elasticsearch_dsl_drf.filter_backends import (
+    FilteringFilterBackend,
+    OrderingFilterBackend,
+    DefaultOrderingFilterBackend,
+    SearchFilterBackend,
+)
+
+from django_elasticsearch_dsl_drf.viewsets import DocumentViewSet
+
+
+from .serializer import OrganizationDocumentSerializer
+from .documents import OrganizationDocument
+
+
+class OrganizationDocumentViewSet(DocumentViewSet):
+    document = OrganizationDocument
+    serializer_class = OrganizationDocumentSerializer
+    lookup_field = 'id'
+    filter_backends = [
+        FilteringFilterBackend,
+        OrderingFilterBackend,
+        DefaultOrderingFilterBackend,
+        SearchFilterBackend,
+    ]
+    # Define search fields
+    search_fields = {
+        'name': {'boost': 2},
+        'description': {'boost': 1},
+    }
+
+    # Define filter fields
+    filter_fields = {
+        'name': 'name.exact',
+        'country': 'country.exact',
+        'industry': 'industry.exact',
+        'year_founded': 'year_founded',
+        'number_of_employees': 'number_of_employees',
+    }
+
+    # Define ordering fields
+    ordering_fields = {
+        'id': 'id',
+        'year_founded': 'year_founded',
+        'number_of_employees': 'number_of_employees',
+    }
+
+    # Specify default ordering
+    ordering = ('year_founded',)
 
 
 class GeneratePresignedUrlView(APIView):

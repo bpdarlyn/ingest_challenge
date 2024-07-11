@@ -20,7 +20,7 @@ class Analyzers:
     )
 
     standard_analyzer = analyzer(
-        'match_analyzer', tokenizer='standard'
+        'match_analyzer', tokenizer='standard', filter=["lowercase"]
     )
 
     mistake_analyzer = analyzer(

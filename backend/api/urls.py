@@ -3,6 +3,7 @@ from rest_framework import routers
 from backend.api import views as api_views
 
 router = routers.DefaultRouter()
+router.register(r'organizations', api_views.OrganizationDocumentViewSet, basename='organizationdocument')
 # router.register(f'companies', api_views.CompanyViewSet)
 
 urlpatterns = [

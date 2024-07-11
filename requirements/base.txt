@@ -12,7 +12,8 @@ click-plugins==1.1.1
 click-repl==0.3.0
 Django==4.2
 django-elasticsearch-dsl==8.0
-django-elasticsearch-dsl-drf==0.22.5
+# django-elasticsearch-dsl-drf==0.22.5
+git+https://github.com/abdelslam1997/django-elasticsearch-dsl-drf.git@master#egg=django-elasticsearch-dsl-drf
 django-nine==0.2.7
 djangorestframework==3.15.2
 elastic-transport==8.13.1
