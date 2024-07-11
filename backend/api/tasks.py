@@ -13,7 +13,8 @@ import pandas as pd
 from django.db.models.fields import Field
 from django.db import connection, transaction
 from backend.api.models import Country, Industry, Organization
-from celery.result import AsyncResult
+from backend.api.documents import OrganizationDocument
+from celery.result import AsyncResult, GroupResult
 
 from backend.helpers.handler_s3 import HandlerS3
 from django.conf import settings
@@ -137,21 +138,51 @@ def prepare_organization(self, results):
     return all_chunks, column_order
 
 
-def import_to_elastic(csv_file_path, entity, index, header):
-    df = pd.read_csv(csv_file_path, header=None, names=header)
+def import_to_elastic(csv_file_path, index):
+    df = pd.read_csv(csv_file_path)
     list_of_dicts = df.to_dict('records')
     for doc in list_of_dicts:
         yield {'_index': index,
                '_source': doc}
 
 
-def run_bulk_import_elastic_search(csv_file_path, entity, index, header):
+@shared_task(bind=True, autoretry_for=(Exception,), retry_kwargs={'max_retries': 3, 'countdown': 5})
+def run_bulk_import_elastic_search(self, csv_path_file, index_name):
     es_client = Elasticsearch(settings.ELASTICSEARCH_DSL['default']['hosts'])
 
-    for status_ok, response in helpers.streaming_bulk(es_client, actions=import_to_elastic(csv_file_path=csv_file_path, entity=entity, index=index, header=header)):
+    response_chunks = helpers.streaming_bulk(
+            es_client,
+            actions=import_to_elastic(
+                csv_file_path=csv_path_file,
+                index=index_name
+            )
+    )
+
+    for status_ok, response in response_chunks:
         if not status_ok:
-            # if failure inserting, log response
-            print(response)
+            print(f'status_ok: {status_ok}, response={response}')
+            raise Exception(str(response))
+
+
+@shared_task(bind=True)
+def prepare_data_for_elastic_search(self, *args, **kwargs):
+    chunk_size = 10_000
+
+    _, _, csv_file_path = args[0]
+    # Columns of Document Organization
+    columns = ['index_item', 'organization_id', 'name', 'website', 'country', 'description',
+                           'year_founded', 'industry', 'number_of_employees']
+    df = pd.read_csv(csv_file_path, names=columns, header=0)
+    df = df.drop(columns=['index_item'])
+
+    all_chunks = []
+
+    for i, chunk in enumerate(split_dataframe(df, chunk_size)):
+        csv_file_path = f'/tmp/organizations_document_chunk_{i + 1}.csv'
+        chunk.to_csv(csv_file_path, index=False)
+        all_chunks.append(csv_file_path)
+    index_name = settings.ELASTICSEARCH_INDEX_NAMES['documents.organization']
+    return all_chunks, index_name
 
 
 @shared_task(bind=True)
@@ -164,9 +195,6 @@ def process_chunk_organization(self, csv_file_path, headers):
                         SELECT {','.join(headers)} FROM tmp_{table_name};
                     """
     run_bulk_import(csv_file_path=csv_file_path, entity=Organization, additional_query=additional_query, headers=headers)
-
-    index = settings.ELASTICSEARCH_INDEX_NAMES['documents.organization']
-    run_bulk_import_elastic_search(csv_file_path=csv_file_path, entity=Organization, index=index, header=headers)
 
     self.update_state(state='PROGRESS', meta={'progress': 100})
 
@@ -184,7 +212,54 @@ def finish_processing(self, results):
 @shared_task(bind=True)
 def create_groups(self, results):
     self.update_state(state='PROGRESS', meta={'progress': 100})
-    return group(process_chunk_organization.s(x, results[1]) for x in results[0]).apply_async()
+    workers = group(process_chunk_organization.s(x, results[1]) for x in results[0])
+    results = workers.apply_async().get(disable_sync_subtasks=False)
+    return 'success create_groups'
+
+
+@shared_task
+def verify_tasks_status(*args, **kwargs):
+    for task_result in args:
+        if isinstance(task_result, dict) and task_result.get('status') == 'FAILURE':
+            raise Exception(f'Task failed with error: {task_result.get("exc_message")}')
+    return 'All tasks completed successfully'
+
+
+@shared_task(bind=True)
+def create_groups_of_document(self, results):
+    csv_files = results[0]
+    index_name = results[1]
+    self.update_state(state='PROGRESS', meta={'progress': 100})
+    workers = group(run_bulk_import_elastic_search.s(x, index_name) for x in csv_files)
+    results = workers.apply_async().get(disable_sync_subtasks=False)
+    return 'success create_groups_of_document'
+
+
+def iter_group_result(group_result):
+    if isinstance(group_result, GroupResult):
+        async_results = group_result.results
+        for async_result in async_results:
+            iter_group_result(async_result)
+    elif isinstance(group_result, AsyncResult):
+        if group_result.status == 'FAILURE':
+            raise Exception(group_result.traceback)
+
+
+def calculate_progress(group_result):
+    total_progress = 0
+    if isinstance(group_result, GroupResult):
+        async_results = group_result.results
+        for async_result in async_results:
+            iter_group_result(async_result)
+    elif isinstance(group_result, AsyncResult):
+        if group_result.status == 'FAILURE':
+            raise Exception(group_result.traceback)
+        if group_result.state == 'PROGRESS':
+            total_progress += group_result.info.get('progress', 0)
+        elif group_result.state == 'SUCCESS':
+            total_progress += 100
+
+    return total_progress if total_progress <= 100 else 100
 
 
 @shared_task(bind=True)
@@ -193,30 +268,46 @@ def start_workflow(self, bucket, s3_key):
     final_workflow = chain(
         download_file.s(bucket, s3_key),
         read_file.s(),
-        chord(group(process_industries.s(), process_countries.s()), prepare_organization.s()),
-        chord(create_groups.s(), finish_processing.s())
+        group(
+            chain(
+                chord(group(process_industries.s(), process_countries.s()), prepare_organization.s()),
+                chord(create_groups.s(), finish_processing.s())
+            ),
+            chain(
+                prepare_data_for_elastic_search.s(),
+                create_groups_of_document.s(),
+            )
+        ),
     )
 
     result = final_workflow.apply_async()
-    task_ids = get_task_ids(result)
+    all_result_tasks = get_result_tasks_objects(result)
 
     while not result.ready():
         total_progress = 0
-        for task_id in task_ids:
-            res = AsyncResult(task_id)
-            if res.state == 'PROGRESS':
-                total_progress += res.info.get('progress', 0)
-            elif res.state == 'SUCCESS':
-                total_progress += 100
-        general_progress = total_progress / len(task_ids)
+        for res in all_result_tasks:
+            total_progress += calculate_progress(res)
+            iter_group_result(group_result=res)
+        general_progress = total_progress / len(all_result_tasks)
         self.update_state(state='PROGRESS', meta={'progress': general_progress})
-        time.sleep(1)
+        time.sleep(2)
+
+    if result.failed():
+        iter_group_result(result)
 
     general_progress = 100
     self.update_state(state='PROGRESS', meta={'progress': general_progress})
 
     end_time = datetime.datetime.now()
     execution_time = (end_time - start_time).total_seconds()
+
+    self.update_state(state='SUCCESS', meta={
+        'result_task_id': result.id,
+        'start_time': start_time.isoformat(),
+        'end_time': end_time.isoformat(),
+        'execution_time': execution_time,
+        'general_progress': general_progress
+    })
 
     return {
         'result_task_id': result.id,
@@ -231,16 +322,13 @@ def bulk_import_entity(csv_file_path, entity, additional_query=None, headers=Non
     table_name = entity._meta.db_table
     with connection.cursor() as cursor:
         query = f"CREATE TEMP TABLE tmp_{table_name} (LIKE {table_name} INCLUDING ALL);"
-        print(query)
         cursor.execute(query)
 
         with open(csv_file_path, 'r') as f:
             query = f"COPY tmp_{table_name}({','.join(headers)}) FROM stdin WITH CSV"
-            print(query)
             cursor.copy_expert(query, f)
 
         if additional_query:
-            print(additional_query)
             cursor.execute(additional_query)
 
 
@@ -254,12 +342,19 @@ def split_dataframe(df, chunk_size):
         yield df.iloc[i:i + chunk_size]
 
 
-def get_task_ids(result):
+def get_result_tasks_objects(result):
     task_ids = []
     def recurse(result):
-        task_ids.append(result.id)
+        task_ids.append(result)
         if hasattr(result, 'parent') and result.parent:
             recurse(result.parent)
     recurse(result)
     return task_ids
 
+
+@shared_task(bind=True)
+def error_handler(self, *args, **kwargs):
+    print(f'*ARGS: {args}')
+    print(f'*KWARGS: {kwargs}')
+    self.update_state(state='FAILURE', meta={'exc_type': str(type(args)), 'exc_message': f'Error on {args}'})
+    raise Exception(str('Generic Exception'))

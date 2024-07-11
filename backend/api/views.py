@@ -55,11 +55,17 @@ class StartProcessingView(APIView):
     def get(self, request, job_id):
         result = AsyncResult(job_id)
         # execution_time = result.date_done - result.date_submitted
+        info = result.info
+
+        if result.failed():
+            if isinstance(result.info, Exception):
+                info = str(result.info)
+
         response_data = {
             'task_id': job_id,
             'status': result.status,
-            'info': result.info if not result.ready() else None,
-            'result': result.result if result.ready() else None,
+            'info': info,
+            'result': result.result if result.successful() else None,
         }
 
         return Response(response_data, status=status.HTTP_200_OK)
