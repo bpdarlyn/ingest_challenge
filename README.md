@@ -58,6 +58,7 @@ docker compose -f local.yml up --build
 Open another terminal and sync the index
 
 ```
+docker compose -f local.yml exec celeryworker python manage.py migrate
 docker compose -f local.yml exec celeryworker python manage.py search_index --rebuild
 ```
 
