@@ -1,23 +1,75 @@
 import time
 import datetime
-import logging
 import os
 
-logger = logging.getLogger(__package__)
 
 from celery import chain, group, chord, shared_task
-from celery.contrib import rdb
 from elasticsearch import Elasticsearch, helpers
 
 import pandas as pd
-from django.db.models.fields import Field
 from django.db import connection, transaction
 from backend.api.models import Country, Industry, Organization
-from backend.api.documents import OrganizationDocument
 from celery.result import AsyncResult, GroupResult
 
 from backend.helpers.handler_s3 import HandlerS3
 from django.conf import settings
+
+
+# Main Workflow
+@shared_task(bind=True)
+def start_workflow(self, bucket, s3_key):
+    start_time = datetime.datetime.now()
+    final_workflow = chain(
+        download_file.s(bucket, s3_key),
+        read_file.s(),
+        group(
+            chain(
+                chord(group(process_industries.s(), process_countries.s()), prepare_organization.s()),
+                chord(create_groups.s(), finish_processing.s())
+            ),
+            chain(
+                prepare_data_for_elastic_search.s(),
+                create_groups_of_document.s(),
+            )
+        ),
+    )
+
+    result = final_workflow.apply_async()
+    all_result_tasks = get_result_tasks_objects(result)
+
+    while not result.ready():
+        total_progress = 0
+        for res in all_result_tasks:
+            total_progress += calculate_progress(res)
+            iter_group_result(group_result=res)
+        general_progress = total_progress / len(all_result_tasks)
+        self.update_state(state='PROGRESS', meta={'progress': general_progress})
+        time.sleep(2)
+
+    if result.failed():
+        iter_group_result(result)
+
+    general_progress = 100
+    self.update_state(state='PROGRESS', meta={'progress': general_progress})
+
+    end_time = datetime.datetime.now()
+    execution_time = (end_time - start_time).total_seconds()
+
+    self.update_state(state='SUCCESS', meta={
+        'result_task_id': result.id,
+        'start_time': start_time.isoformat(),
+        'end_time': end_time.isoformat(),
+        'execution_time': execution_time,
+        'general_progress': general_progress
+    })
+
+    return {
+        'result_task_id': result.id,
+        'start_time': start_time.isoformat(),
+        'end_time': end_time.isoformat(),
+        'execution_time': execution_time,
+        'general_progress': general_progress
+    }
 
 
 @shared_task(bind=True)
@@ -260,62 +312,6 @@ def calculate_progress(group_result):
             total_progress += 100
 
     return total_progress if total_progress <= 100 else 100
-
-
-@shared_task(bind=True)
-def start_workflow(self, bucket, s3_key):
-    start_time = datetime.datetime.now()
-    final_workflow = chain(
-        download_file.s(bucket, s3_key),
-        read_file.s(),
-        group(
-            chain(
-                chord(group(process_industries.s(), process_countries.s()), prepare_organization.s()),
-                chord(create_groups.s(), finish_processing.s())
-            ),
-            chain(
-                prepare_data_for_elastic_search.s(),
-                create_groups_of_document.s(),
-            )
-        ),
-    )
-
-    result = final_workflow.apply_async()
-    all_result_tasks = get_result_tasks_objects(result)
-
-    while not result.ready():
-        total_progress = 0
-        for res in all_result_tasks:
-            total_progress += calculate_progress(res)
-            iter_group_result(group_result=res)
-        general_progress = total_progress / len(all_result_tasks)
-        self.update_state(state='PROGRESS', meta={'progress': general_progress})
-        time.sleep(2)
-
-    if result.failed():
-        iter_group_result(result)
-
-    general_progress = 100
-    self.update_state(state='PROGRESS', meta={'progress': general_progress})
-
-    end_time = datetime.datetime.now()
-    execution_time = (end_time - start_time).total_seconds()
-
-    self.update_state(state='SUCCESS', meta={
-        'result_task_id': result.id,
-        'start_time': start_time.isoformat(),
-        'end_time': end_time.isoformat(),
-        'execution_time': execution_time,
-        'general_progress': general_progress
-    })
-
-    return {
-        'result_task_id': result.id,
-        'start_time': start_time.isoformat(),
-        'end_time': end_time.isoformat(),
-        'execution_time': execution_time,
-        'general_progress': general_progress
-    }
 
 
 def bulk_import_entity(csv_file_path, entity, additional_query=None, headers=None):

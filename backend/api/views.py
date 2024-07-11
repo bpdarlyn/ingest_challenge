@@ -9,14 +9,6 @@ from backend.api import tasks as api_tasks
 from celery.result import AsyncResult
 
 
-from django_elasticsearch_dsl_drf.constants import (
-    LOOKUP_FILTER_TERMS,
-    LOOKUP_FILTER_RANGE,
-    LOOKUP_FILTER_PREFIX,
-    LOOKUP_FILTER_WILDCARD,
-    LOOKUP_QUERY_IN,
-    LOOKUP_QUERY_EXCLUDE,
-)
 from django_elasticsearch_dsl_drf.filter_backends import (
     FilteringFilterBackend,
     OrderingFilterBackend,
@@ -58,7 +50,6 @@ class OrganizationDocumentViewSet(DocumentViewSet):
 
     # Define ordering fields
     ordering_fields = {
-        'id': 'id',
         'year_founded': 'year_founded',
         'number_of_employees': 'number_of_employees',
     }
